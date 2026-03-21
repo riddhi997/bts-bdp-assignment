@@ -1,10 +1,14 @@
 import os
+import shutil
+import requests
 from typing import Annotated
 
 from fastapi import APIRouter, status
 from fastapi.params import Query
 
 from bdi_api.settings import Settings
+
+import duckdb
 
 settings = Settings()
 
@@ -52,6 +56,28 @@ def download_data(
     base_url = settings.source_url + "/2023/11/01/"
     # TODO Implement download
 
+    # Clean the download folder
+    if os.path.exists(download_dir):
+        shutil.rmtree(download_dir)
+    os.makedirs(download_dir, exist_ok=True)
+    
+    # Download files (increment by 5: 000000Z, 000005Z, 000010Z...)
+    for i in range(file_limit):
+        file_num = i * 5
+        filename = f"{file_num:06d}Z.json.gz"
+        url = base_url + filename
+        filepath = os.path.join(download_dir, filename)
+        
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                with open(filepath, 'wb') as f:
+                    f.write(response.content)
+            else:
+                print(f"Failed: {filename} - Status {response.status_code}")
+        except Exception as e:
+            print(f"Error downloading {filename}: {e}")
+
     return "OK"
 
 
@@ -75,6 +101,86 @@ def prepare_data() -> str:
     Keep in mind that we are downloading a lot of small files, and some libraries might not work well with this!
     """
     # TODO
+
+    # Set up paths
+    raw_dir = os.path.join(settings.raw_dir, "day=20231101")
+    db_path = os.path.join(settings.prepared_dir, "aircraft.db")
+    
+    # Clean prepared folder
+    if os.path.exists(settings.prepared_dir):
+        shutil.rmtree(settings.prepared_dir)
+    os.makedirs(settings.prepared_dir, exist_ok=True)
+    
+    # Create DuckDB database
+    conn = duckdb.connect(str(db_path))
+
+    # STEP 1: Rename all .json.gz files to .json
+    print(f"Renaming files in {raw_dir}")
+    for filename in os.listdir(raw_dir):
+        if filename.endswith('.json.gz'):
+            old_path = os.path.join(raw_dir, filename)
+            new_filename = filename.replace('.json.gz', '.json')
+            new_path = os.path.join(raw_dir, new_filename)
+            os.rename(old_path, new_path)
+            print(f"  Renamed: {filename} -> {new_filename}")
+
+    # STEP 2: Create a table with raw data and unnested aircraft
+    conn.execute(f"""
+        CREATE OR REPLACE TABLE positions AS
+        WITH unnested AS (
+                 SELECT 
+                 raw_data.now as timestamp, unnested.value as aircraft_obj
+                 FROM read_json_auto('{raw_dir}/*.json') AS raw_data,
+                 UNNEST(raw_data.aircraft) AS unnested(value)
+                 )
+
+        SELECT 
+            timestamp,
+            aircraft_obj ->> 'hex' as icao,
+            aircraft_obj ->> 'r' as registration,
+            aircraft_obj ->> 't' as type,
+            CASE 
+                WHEN (aircraft_obj ->> 'lat') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'lat')::DOUBLE 
+                ELSE NULL 
+            END as lat,
+            CASE 
+                WHEN (aircraft_obj ->> 'lon') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'lon')::DOUBLE 
+                ELSE NULL 
+            END as lon,
+            CASE 
+                WHEN (aircraft_obj ->> 'alt_baro') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'alt_baro')::DOUBLE 
+                ELSE NULL 
+            END as altitude,
+            CASE 
+                WHEN (aircraft_obj ->> 'gs') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'gs')::DOUBLE 
+                ELSE NULL 
+            END as ground_speed,
+            CASE 
+                WHEN (aircraft_obj ->> 'track') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'track')::DOUBLE 
+                ELSE NULL 
+            END as track,
+            CASE 
+                WHEN (aircraft_obj ->> 'baro_rate') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'baro_rate')::DOUBLE 
+                ELSE NULL 
+            END as baro_rate,
+            CASE 
+                WHEN (aircraft_obj ->> 'seen_pos') ~ '^[0-9\\.-]+$' 
+                THEN (aircraft_obj ->> 'seen_pos')::DOUBLE 
+                ELSE NULL 
+            END as seen_pos
+        FROM unnested
+        WHERE aircraft_obj ->> 'hex' IS NOT NULL
+    """)
+    
+    
+    conn.close()
+    
     return "OK"
 
 
@@ -84,7 +190,24 @@ def list_aircraft(num_results: int = 100, page: int = 0) -> list[dict]:
     icao asc
     """
     # TODO
-    return [{"icao": "0d8300", "registration": "YV3382", "type": "LJ31"}]
+
+    # Connect to the database
+    conn = duckdb.connect(str(os.path.join(settings.prepared_dir, "aircraft.db")))
+    
+    # Get unique aircraft with pagination
+    offset = page * num_results
+    result = conn.execute("""
+        SELECT DISTINCT icao, registration, type
+        FROM positions
+        WHERE icao IS NOT NULL
+        ORDER BY icao ASC
+        LIMIT ? OFFSET ?
+    """, [num_results, offset]).fetchall()
+    
+    conn.close()
+
+    # Convert to list of dictionaries
+    return [{"icao": row[0], "registration": row[1], "type": row[2]} for row in result]
 
 
 @s1.get("/aircraft/{icao}/positions")
@@ -93,8 +216,34 @@ def get_aircraft_position(icao: str, num_results: int = 1000, page: int = 0) -> 
     If an aircraft is not found, return an empty list.
     """
     # TODO implement and return a list with dictionaries with those values.
-    return [{"timestamp": 1609275898.6, "lat": 30.404617, "lon": -86.476566}]
 
+    # Connect to the database
+    conn = duckdb.connect(str(os.path.join(settings.prepared_dir, "aircraft.db")))
+    
+    # Get positions with pagination
+    offset = page * num_results
+    result = conn.execute("""
+        SELECT timestamp, lat, lon, altitude, ground_speed, track
+        FROM positions
+        WHERE icao = ?
+        ORDER BY timestamp ASC
+        LIMIT ? OFFSET ?
+    """, [icao, num_results, offset]).fetchall()
+    
+    conn.close()
+    
+    # Convert to list of dictionaries
+    return [
+        {
+            "timestamp": row[0],
+            "lat": row[1],
+            "lon": row[2],
+            "altitude": row[3],
+            "ground_speed": row[4],
+            "track": row[5]
+        }
+        for row in result
+    ]
 
 @s1.get("/aircraft/{icao}/stats")
 def get_aircraft_statistics(icao: str) -> dict:
@@ -105,4 +254,27 @@ def get_aircraft_statistics(icao: str) -> dict:
     * had_emergency
     """
     # TODO Gather and return the correct statistics for the requested aircraft
-    return {"max_altitude_baro": 300000, "max_ground_speed": 493, "had_emergency": False}
+
+    # Connect to the database
+    conn = duckdb.connect(str(os.path.join(settings.prepared_dir, "aircraft.db")))
+    
+    # Get statistics
+    result = conn.execute("""
+        SELECT 
+            MAX(altitude) as max_altitude,
+            MAX(ground_speed) as max_speed
+        FROM positions
+        WHERE icao = ?
+    """, [icao]).fetchone()
+    
+    conn.close()
+    
+    # Handle case where aircraft not found
+    if result[0] is None and result[1] is None:
+        return {"max_altitude_baro": None, "max_ground_speed": None, "had_emergency": False}
+    
+    return {
+        "max_altitude_baro": result[0] if result[0] is not None else 0,
+        "max_ground_speed": result[1] if result[1] is not None else 0,
+        "had_emergency": False  # We don't have emergency data in these files
+    }
