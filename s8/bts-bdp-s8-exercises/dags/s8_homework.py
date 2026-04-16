@@ -3,7 +3,6 @@ S8 Homework: Aircraft Data Pipeline DAG
 Downloads ADS-B aircraft tracking data, enriches with metadata,
 stores in bronze/silver layers, and loads into SQLite.
 """
-import io
 import json
 import os
 import sqlite3

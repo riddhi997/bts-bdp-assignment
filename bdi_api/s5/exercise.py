@@ -107,7 +107,7 @@ def seed_database() -> str:
     # TODO: Execute the seed data SQL (see hr_seed_data.sql)
     sql = """
         TRUNCATE TABLE salary_history, employee_project, project, employee, department RESTART IDENTITY CASCADE;
-        
+
         INSERT INTO department (name, location) VALUES
             ('Engineering', 'Barcelona'),
             ('Marketing', 'Madrid'),

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
+from neo4j import GraphDatabase
 from pydantic import BaseModel
 
-from neo4j import GraphDatabase
 from bdi_api.settings import Settings
 
 settings = Settings()

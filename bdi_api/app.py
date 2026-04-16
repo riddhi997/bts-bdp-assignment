@@ -1,6 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI
@@ -12,6 +12,10 @@ from bdi_api.examples import v0_router
 from bdi_api.s1.exercise import s1
 from bdi_api.s4.exercise import s4
 from bdi_api.s5.exercise import s5
+from bdi_api.s6.exercise import s6
+from bdi_api.s7.exercise import s7
+from bdi_api.s8.exercise import s8
+from bdi_api.s9.exercise import s9
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -49,8 +53,12 @@ app = FastAPI(
 
 app.include_router(v0_router)
 app.include_router(s1)
-app.include_router(s4, prefix="/api/s4")
+app.include_router(s4)
 app.include_router(s5)
+app.include_router(s6)
+app.include_router(s7)
+app.include_router(s8)
+app.include_router(s9)
 
 
 @app.get("/health", status_code=200)
@@ -65,16 +73,6 @@ async def get_health() -> JSONResponse:
 async def get_version() -> dict:
     return {"version": bdi_api.__version__}
 
-@app.get("/debug/routes")
-async def debug_routes():
-    routes = []
-    for route in app.routes:
-        routes.append({
-            "path": route.path,
-            "name": route.name if hasattr(route, "name") else str(route),
-            "methods": list(route.methods) if hasattr(route, "methods") else None
-        })
-    return routes
 
 def main() -> None:
     uvicorn.run(app, host="0.0.0.0", port=8080, proxy_headers=True, access_log=False)
